@@ -46,6 +46,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Iterable, Optional
+from urllib.parse import quote
 
 import requests
 from PIL import Image, UnidentifiedImageError
@@ -62,12 +63,17 @@ SUPPORTED_BROWSERS = ("chrome", "firefox", "edge", "brave", "chromium", "opera",
 
 DEFAULT_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/javascript, */*, q=0.01",
     "Accept-Language": "en-US,en;q=0.9",
     "X-Requested-With": "XMLHttpRequest",
+    # Pinterest's WAF rejects resource requests without these ("Invalid
+    # Resource Request" / 403). The handler is the critical one.
+    "x-pinterest-pws-handler": "www/search/[scope].js",
+    "x-pinterest-appstate": "active",
+    "screen-density": "2",
     "Referer": "https://www.pinterest.com/",
 }
 
@@ -142,6 +148,10 @@ class PinterestDownloader:
         self.state = State.load(cfg.tracker_path)
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
+        # These must reflect the actual search page for the WAF to accept it.
+        search_path = f"/search/pins/?q={quote(cfg.query)}"
+        self.session.headers["Referer"] = f"https://www.pinterest.com{search_path}"
+        self.session.headers["x-pinterest-source-url"] = search_path
         self._downloaded = 0
         self._skipped_dupes = 0
         self._stop = threading.Event()
@@ -302,7 +312,7 @@ class PinterestDownloader:
     # -- single-pin download ----------------------------------------------- #
     def process_pin(self, pin: dict) -> bool:
         """Download one pin's image. Returns True if a new file was saved."""
-        if self._stop.is_set():
+        if self._stop.is_set() or self._downloaded >= self.cfg.target_count:
             return False
 
         pin_id = pin.get("id")
@@ -404,12 +414,14 @@ class PinterestDownloader:
                         continue
                     empty_pages = 0
 
+                    # Submit at most `remaining` pins so we don't overshoot the
+                    # target by a whole page. Skipped pins (dupes/too small/no
+                    # url) just mean the next page tops us up.
                     remaining = self.cfg.target_count - self._downloaded
                     futures = [pool.submit(self.process_pin, pin)
-                               for pin in pins[: max(remaining * 2, len(pins))]]
+                               for pin in pins[:remaining]]
                     for _ in as_completed(futures):
-                        if self._downloaded >= self.cfg.target_count:
-                            break
+                        pass
 
                     self.state.bookmark = next_bookmark
                     self.state.save(self.cfg.tracker_path)
