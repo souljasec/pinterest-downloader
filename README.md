@@ -5,6 +5,7 @@ highest-resolution image for each result. It paginates through results,
 remembers what it has already saved (per folder), and can be stopped and resumed
 at any time.
 
+- **No stored credentials** — reads your existing browser login at runtime
 - **Concurrent downloads** for speed
 - **Resumable** — re-run the same query/folder to pick up where you left off
 - **Deduplication** by pin ID *and* by image content hash (same picture served
@@ -33,6 +34,32 @@ python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+## Authentication
+
+Pinterest's search endpoint generally requires a **logged-in session**, so the
+script authenticates automatically at startup:
+
+1. It reads the Pinterest session cookie from the browser you're **already
+   logged into** (Chrome, Firefox, Safari, Edge, Brave, Chromium, or Opera).
+2. If it can't find a logged-in session, it **opens Pinterest's login page in
+   your default browser**. Log in there, come back to the terminal, and press
+   `ENTER` — it then reads the fresh cookie and continues.
+
+**No credentials or tokens are ever written to disk or stored in the source.**
+Cookies are read from your browser's cookie store and kept only in memory for
+the duration of the run.
+
+By default it tries all supported browsers. To point at a specific one:
+
+```bash
+python pinterest_downloader.py -q "ceramics" -n 50 --browser firefox
+```
+
+> **macOS note:** reading Chrome/Safari cookies may trigger a Keychain prompt
+> the first time (`browser_cookie3` needs it to decrypt the cookie store).
+> Allow it. If Chrome cookies can't be read, `--browser firefox` is the easiest
+> fallback.
 
 ## Usage
 
@@ -67,6 +94,7 @@ python pinterest_downloader.py -q "brutalist architecture" -n 200 -o ./downloads
 | `--min-res`      | `0` (off)            | Skip images smaller than this many px (w or h).    |
 | `--page-size`    | `25`                 | Results requested per API page.                    |
 | `--delay`        | `1.0`                | Seconds to wait between search pages.              |
+| `--browser`      | `auto`               | Browser to read the Pinterest login cookie from.   |
 | `-v`, `--verbose`| off                  | Debug logging (shows skips/retries).               |
 
 > If you pass `-q` **and** `-n`, it runs fully non-interactively. Omit either one
@@ -103,6 +131,9 @@ printed — so it's always safe to resume later.
 
 ## Troubleshooting
 
+- **"No logged-in session found" / empty results** — you're not logged into
+  Pinterest in the browser it read from. Log in when the browser opens (then
+  press ENTER), or pass `--browser <name>` to point at the right browser.
 - **"Empty page" / stops early** — Pinterest may be rate-limiting. Lower
   `--workers`, raise `--delay`, and try again in a few minutes.
 - **Nothing downloads** — run with `-v` to see whether images are being skipped

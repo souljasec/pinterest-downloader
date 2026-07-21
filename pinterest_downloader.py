@@ -18,6 +18,14 @@ Usage:
     python pinterest_downloader.py -q "brutalist architecture" -n 200 \
         --workers 8 --min-res 400 --verbose
 
+Authentication:
+    Pinterest's search endpoint generally needs a logged-in session. This
+    script does NOT store any credentials or tokens. Instead, at runtime it
+    reads the Pinterest session cookie from the browser you're already logged
+    into (via `browser_cookie3`). If you're not logged in, it opens Pinterest's
+    login page in your default browser, waits for you to sign in, then reads the
+    fresh cookie. Cookies live only in memory for the duration of the run.
+
 For personal / research use. Respect Pinterest's Terms of Service and
 robots.txt, and don't hammer the endpoint.
 """
@@ -33,6 +41,7 @@ import signal
 import sys
 import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -46,6 +55,10 @@ log = logging.getLogger("pinterest")
 SEARCH_URL = "https://www.pinterest.com/resource/BaseSearchResource/get/"
 END_BOOKMARK = "-end-"  # Pinterest's sentinel meaning "no more results".
 MAX_IMAGE_BYTES = 25 * 1024 * 1024  # Skip anything larger than 25 MB.
+LOGIN_URL = "https://www.pinterest.com/login/"
+
+# Browsers browser_cookie3 can read a logged-in Pinterest session from.
+SUPPORTED_BROWSERS = ("chrome", "firefox", "edge", "brave", "chromium", "opera", "safari")
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -73,6 +86,7 @@ class Config:
     request_delay: float = 1.0  # Polite delay between search pages.
     max_empty_pages: int = 5
     timeout: float = 15.0
+    browser: str = "auto"     # Which browser to read the session cookie from.
 
     @property
     def tracker_path(self) -> str:
@@ -132,14 +146,87 @@ class PinterestDownloader:
         self._skipped_dupes = 0
         self._stop = threading.Event()
 
-    # -- network helpers ---------------------------------------------------- #
-    def _warm_up(self) -> None:
-        """Load the homepage once so the session picks up cookies Pinterest
-        expects on subsequent API calls (reduces empty/blocked responses)."""
+    # -- authentication ----------------------------------------------------- #
+    def _authenticate(self) -> None:
+        """Load a Pinterest session from the local browser. No credentials or
+        tokens are stored by this script — cookies are read from the browser
+        you're already logged into and kept only in memory for this run."""
+        if self._load_cookies():
+            return
+
+        log.warning("No logged-in Pinterest session found in your browser.")
         try:
-            self.session.get("https://www.pinterest.com/", timeout=self.cfg.timeout)
-        except requests.RequestException as exc:
-            log.debug("Warm-up request failed (continuing anyway): %s", exc)
+            webbrowser.open(LOGIN_URL)
+        except Exception:  # webbrowser can raise on headless setups
+            log.info("Open this URL and log in: %s", LOGIN_URL)
+        try:
+            input("\n[?] Log in to Pinterest in the browser window that opened, "
+                  "then press ENTER here to continue... ")
+        except EOFError:
+            pass  # non-interactive stdin
+
+        if not self._load_cookies():
+            log.warning(
+                "Still no logged-in session detected. Continuing anonymously — "
+                "results may be empty or limited. Tip: pass --browser <name> to "
+                "point at the browser you use for Pinterest."
+            )
+
+    def _load_cookies(self) -> bool:
+        """Read Pinterest cookies from the browser cookie store.
+
+        Returns True only when a *logged-in* session cookie is found. Any
+        cookies (even anonymous) are still applied so requests look consistent.
+        """
+        try:
+            import browser_cookie3 as bc3
+        except ImportError:
+            log.error("browser_cookie3 is not installed. "
+                      "Run: pip install browser_cookie3")
+            return False
+
+        loaders = {
+            "chrome": bc3.chrome, "firefox": bc3.firefox, "edge": bc3.edge,
+            "brave": bc3.brave, "chromium": bc3.chromium, "opera": bc3.opera,
+            "safari": bc3.safari,
+        }
+        names = (SUPPORTED_BROWSERS if self.cfg.browser == "auto"
+                 else (self.cfg.browser,))
+
+        fallback = None  # first browser with any Pinterest cookies at all
+        for name in names:
+            loader = loaders.get(name)
+            if loader is None:
+                continue
+            try:
+                jar = loader(domain_name="pinterest.com")
+            except Exception as exc:  # locked DB, browser not installed, etc.
+                log.debug("Could not read %s cookies: %s", name, exc)
+                continue
+
+            cookies = {c.name: c for c in jar}
+            if not cookies:
+                continue
+
+            auth = cookies.get("_auth")
+            if auth is not None and auth.value not in ("", "0"):
+                self._apply_cookies(jar, cookies)
+                log.info("Using logged-in Pinterest session from %s.", name)
+                return True
+            if fallback is None:
+                fallback = (jar, cookies)
+
+        if fallback is not None:
+            self._apply_cookies(*fallback)
+            log.debug("Loaded anonymous Pinterest cookies from browser.")
+        return False
+
+    def _apply_cookies(self, jar, cookies: dict) -> None:
+        self.session.cookies.update(jar)
+        # Many Pinterest resource calls require the CSRF token as a header.
+        csrf = cookies.get("csrftoken")
+        if csrf is not None:
+            self.session.headers["X-CSRFToken"] = csrf.value
 
     def _get_with_retry(self, url: str, *, params=None, stream=False,
                         max_retries: int = 4) -> Optional[requests.Response]:
@@ -290,7 +377,7 @@ class PinterestDownloader:
     # -- main loop ---------------------------------------------------------- #
     def run(self) -> None:
         self._install_signal_handler()
-        self._warm_up()
+        self._authenticate()
 
         log.info("Query        : %s", self.cfg.query)
         log.info("Destination  : %s", self.cfg.save_dir)
@@ -379,7 +466,7 @@ def _prompt(msg: str, *, validate=None, default: Optional[str] = None) -> str:
         print("  [!] Invalid input, try again.")
 
 
-def _interactive_config() -> Config:
+def _interactive_config(browser: str = "auto") -> Config:
     print("=" * 60)
     print("      SMART PINTEREST BATCH DOWNLOADER")
     print("=" * 60 + "\n")
@@ -396,7 +483,7 @@ def _interactive_config() -> Config:
             return (False, v)
 
     count = int(_prompt("[?] How many NEW images this session", validate=_int_gt0))
-    return Config(query=query, save_dir=save_dir, target_count=count)
+    return Config(query=query, save_dir=save_dir, target_count=count, browser=browser)
 
 
 def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
@@ -410,6 +497,10 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
     p.add_argument("--page-size", type=int, default=25, help="Results per API page.")
     p.add_argument("--delay", type=float, default=1.0,
                    help="Seconds between search pages (default 1.0).")
+    p.add_argument("--browser", default="auto",
+                   choices=("auto", *SUPPORTED_BROWSERS),
+                   help="Browser to read the logged-in Pinterest cookie from "
+                        "(default: auto = try all).")
     p.add_argument("-v", "--verbose", action="store_true", help="Debug logging.")
     return p.parse_args(list(argv))
 
@@ -417,7 +508,7 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
 def _config_from_args(args: argparse.Namespace) -> Config:
     if not args.query or not args.count:
         # Missing required scripting args → fall back to interactive mode.
-        return _interactive_config()
+        return _interactive_config(browser=args.browser)
     save_dir = args.output or os.path.join(
         os.getcwd(), "downloads", args.query.replace(" ", "_")
     )
@@ -429,6 +520,7 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         min_res=max(0, args.min_res),
         page_size=max(1, args.page_size),
         request_delay=max(0.0, args.delay),
+        browser=args.browser,
     )
 
 

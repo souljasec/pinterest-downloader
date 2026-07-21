@@ -1,2 +1,3 @@
 requests>=2.31
 Pillow>=10.0
+browser_cookie3>=0.19
