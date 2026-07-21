@@ -1,0 +1,19 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Downloaded images & per-folder session state
+downloads/
+*.download_session.json
+.download_session.json
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
