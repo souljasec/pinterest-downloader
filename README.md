@@ -142,6 +142,8 @@ printed — so it's always safe to resume later.
 
 ## License / disclaimer
 
+Licensed under the [MIT License](LICENSE).
+
 Provided as-is for personal and educational use. You are responsible for
 complying with Pinterest's Terms of Service and applicable copyright law when
 downloading and using images.
