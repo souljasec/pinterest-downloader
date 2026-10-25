@@ -1,3 +1,6 @@
-requests>=2.31
-Pillow>=10.0
+# Floors raised past known CVEs: requests netrc leak (<2.32.4), urllib3
+# redirect/auth issues (<2.5.0), Pillow buffer-overflow / code-exec (<10.4).
+requests>=2.32.4
+urllib3>=2.5.0
+Pillow>=10.4.0
 browser_cookie3>=0.19
